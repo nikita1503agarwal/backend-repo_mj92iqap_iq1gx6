@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
 import jwt
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
@@ -220,6 +220,44 @@ def seed_and_verify():
 @app.get("/debug/seed-verify")
 def seed_and_verify_get():
     return seed_and_verify()
+
+
+# Allow resetting demo users to a specific password (for debugging)
+@app.post("/debug/reset-demo")
+def reset_demo_passwords(payload: Dict[str, str] = Body(default={})):
+    new_password = payload.get("password") or "Saasoty123!"
+    def ensure_user(name: str, email: str, role: str, assigned_ae_id: Optional[str] = None):
+        u = db["user"].find_one({"email": email})
+        hashed = hash_password(new_password)
+        if u:
+            updates: Dict[str, Any] = {"role": role, "password_hash": hashed}
+            if assigned_ae_id is not None:
+                updates["assigned_ae_id"] = assigned_ae_id
+            db["user"].update_one({"_id": u.get("_id")}, {"$set": updates})
+            return str(u.get("_id"))
+        doc = UserSchema(name=name, email=email, password_hash=hashed, role=role, assigned_ae_id=assigned_ae_id).model_dump()
+        return create_document("user", doc)
+
+    ae_id = ensure_user("Alex AE", "ae@saasoty.io", "ae")
+    client_id = ensure_user("Cathy Client", "client@saasoty.io", "client", assigned_ae_id=ae_id)
+    verifier_id = ensure_user("Vik Verifier", "verifier@saasoty.io", "verifier")
+    admin_id = ensure_user("Ada Admin", "admin@saasoty.io", "admin")
+
+    # verify
+    checks = []
+    for email in ["client@saasoty.io", "ae@saasoty.io", "verifier@saasoty.io", "admin@saasoty.io"]:
+        u = db["user"].find_one({"email": email})
+        ok = False
+        if u and u.get("password_hash"):
+            ok = verify_password(new_password, u.get("password_hash"))
+        checks.append({"email": email, "exists": bool(u), "password_ok": ok})
+
+    return {"reset": True, "password": new_password, "ids": {"ae": ae_id, "client": client_id, "verifier": verifier_id, "admin": admin_id}, "checks": checks}
+
+
+@app.get("/debug/reset-demo")
+def reset_demo_get(password: Optional[str] = Query(None)):
+    return reset_demo_passwords({"password": password} if password else {})
 
 
 # ----------------------------------------------------------------------------
