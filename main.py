@@ -192,6 +192,12 @@ def seed():
     return {"ae_id": ae_id, "client_id": client_id, "verifier_id": verifier_id, "admin_id": admin_id}
 
 
+# Convenience GET for seeding via browser click
+@app.get("/seed")
+def seed_get():
+    return seed()
+
+
 # Debug helper: reseed and verify password hashes for demo users
 @app.post("/debug/seed-verify")
 def seed_and_verify():
@@ -208,6 +214,12 @@ def seed_and_verify():
         result["seeded"] = False
         result["error"] = str(e)
     return result
+
+
+# Convenience GET for seed-verify via browser click
+@app.get("/debug/seed-verify")
+def seed_and_verify_get():
+    return seed_and_verify()
 
 
 # ----------------------------------------------------------------------------
