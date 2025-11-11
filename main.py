@@ -228,7 +228,7 @@ def seed_and_verify_get():
 
 # Allow resetting demo users to a specific password (for debugging)
 @app.post("/debug/reset-demo")
-def reset_demo_passwords(payload: Dict[str, str] = Body(default={})):
+def reset_demo_passwords(payload: Dict[str, str] = Body(default={})): 
     new_password = payload.get("password") or "Saasoty123!"
     def ensure_user(name: str, email: str, role: str, assigned_ae_id: Optional[str] = None):
         u = db["user"].find_one({"email": email})
@@ -650,3 +650,109 @@ def timeline(entity: str, entity_id: str, current=Depends(get_current_user)):
     for l in logs:
         l["id"] = str(l.get("_id"))
     return logs
+
+
+# ----------------------------------------------------------------------------
+# Demo sample data seeding for current user
+# ----------------------------------------------------------------------------
+@app.post("/debug/seed-samples")
+def seed_samples(current=Depends(get_current_user)):
+    """Ensure the current user's dashboard shows representative examples.
+    - Client: create up to 4 requirements across key statuses
+    - AE: assign at least 2 requirements pending estimate
+    - Verifier/Admin: ensure at least 1 PO pending verification
+    Idempotent-ish: will not duplicate if similar records already exist.
+    """
+    role = current.get("role")
+    uid = current.get("id")
+
+    def ensure_requirement(client_id: str, ae_id: Optional[str], rtype: str, subtype: Optional[str], status: str, details: Dict[str, Any]):
+        existing = db["requirement"].find_one({"client_id": client_id, "status": status, "type": rtype, "subtype": subtype})
+        if existing:
+            return str(existing.get("_id"))
+        req = RequirementSchema(
+            client_id=client_id,
+            ae_id=ae_id,
+            type=rtype,
+            subtype=subtype,
+            status=status,
+            details=details,
+            attachments=[],
+        )
+        return create_document("requirement", req)
+
+    def ensure_estimate(requirement_id: str, ae_id: str):
+        existing = db["estimate"].find_one({"requirement_id": requirement_id})
+        if existing:
+            return str(existing.get("_id"))
+        est = EstimateSchema(
+            requirement_id=requirement_id,
+            ae_id=ae_id,
+            amount=999.0,
+            currency="USD",
+            breakdown={"items": [{"label": "Sample", "amount": 999.0}]},
+            notes="Auto-generated for demo",
+            status="sent",
+        )
+        eid = create_document("estimate", est)
+        db["requirement"].update_one({"_id": ObjectId(requirement_id) if ObjectId.is_valid(requirement_id) else requirement_id}, {"$set": {"status": "awaiting_client_decision"}})
+        return eid
+
+    def ensure_po(requirement_id: str):
+        existing = db["po"].find_one({"requirement_id": requirement_id, "status": "pending_verification"})
+        if existing:
+            return str(existing.get("_id"))
+        po = POSchema(
+            requirement_id=requirement_id,
+            po_number=f"PO-{int(datetime.utcnow().timestamp())}",
+            file_url=None,
+            remarks="Auto-seeded",
+            status="pending_verification",
+        )
+        pid = create_document("po", po)
+        db["requirement"].update_one({"_id": ObjectId(requirement_id) if ObjectId.is_valid(requirement_id) else requirement_id}, {"$set": {"status": "pending_verification"}})
+        return pid
+
+    created: Dict[str, Any] = {"role": role, "created": {}}
+
+    # Ensure at least one AE exists
+    ae_doc = db["user"].find_one({"role": "ae"})
+    if not ae_doc:
+        ae_id_new = create_document("user", UserSchema(name="Demo AE", email="ae@saasoty.io", password_hash=hash_password("demo"), role="ae").model_dump())
+        ae_doc = db["user"].find_one({"_id": ObjectId(ae_id_new)}) if ObjectId.is_valid(ae_id_new) else db["user"].find_one({"_id": ae_id_new})
+
+    if role == "client":
+        ae_id = current.get("assigned_ae_id") or (str(ae_doc.get("_id")) if ae_doc else None)
+        # 1) pending_ae_estimate
+        r1 = ensure_requirement(uid, ae_id, "hardware", None, "pending_ae_estimate", {"name": "Laptop", "quantity": 5})
+        # 2) awaiting_client_decision (has estimate)
+        r2 = ensure_requirement(uid, ae_id, "software", "new", "awaiting_client_decision", {"name": "CRM", "quantity": 10})
+        ensure_estimate(r2, ae_id or uid)
+        # 3) client_good_to_go
+        r3 = ensure_requirement(uid, ae_id, "hardware", None, "client_good_to_go", {"name": "Monitors", "quantity": 12})
+        # 4) pending_verification with PO
+        r4 = ensure_requirement(uid, ae_id, "software", "renewal", "pending_verification", {"name": "Email Suite", "quantity": 50})
+        ensure_po(r4)
+        created["created"]["requirements"] = [r1, r2, r3, r4]
+
+    elif role == "ae":
+        # Assign two requirements to this AE pending estimate
+        r1 = ensure_requirement("client_of_" + uid, uid, "hardware", None, "pending_ae_estimate", {"name": "Docking Stations", "quantity": 20})
+        r2 = ensure_requirement("client_of_" + uid, uid, "software", "upgrade", "pending_ae_estimate", {"name": "Analytics", "quantity": 5})
+        created["created"]["requirements"] = [r1, r2]
+
+    elif role in ["verifier", "admin"]:
+        # Ensure at least one pending verification PO
+        # Create a client and requirement if needed
+        client = db["user"].find_one({"role": "client"})
+        if not client:
+            client_id_new = create_document("user", UserSchema(name="Demo Client", email="client@saasoty.io", password_hash=hash_password("demo"), role="client", assigned_ae_id=str(ae_doc.get("_id")) if ae_doc else None).model_dump())
+            client = db["user"].find_one({"_id": ObjectId(client_id_new)}) if ObjectId.is_valid(client_id_new) else db["user"].find_one({"_id": client_id_new})
+        r = ensure_requirement(str(client.get("_id")), str(ae_doc.get("_id")) if ae_doc else None, "hardware", None, "pending_verification", {"name": "Headsets", "quantity": 30})
+        ensure_po(r)
+        created["created"]["po_for_requirement"] = r
+
+    else:
+        pass
+
+    return created
