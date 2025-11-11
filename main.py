@@ -73,6 +73,10 @@ class VerifyPORequest(BaseModel):
     notes: Optional[str] = None
 
 
+class ImpersonateRequest(BaseModel):
+    role: str  # one of client | ae | verifier | admin
+
+
 # ----------------------------------------------------------------------------
 # Utility helpers
 # ----------------------------------------------------------------------------
@@ -303,6 +307,48 @@ def register(payload: RegisterRequest, current=Depends(get_current_user)):
     new_id = create_document("user", user_doc)
     add_audit("user", new_id, "created", current["id"], {"email": payload.email, "role": payload.role})
     return {"id": new_id}
+
+
+@app.post("/auth/impersonate", response_model=TokenResponse)
+def auth_impersonate(payload: ImpersonateRequest):
+    """Developer-only convenience: issue a token for a user with the given role.
+    If no such user exists, create one. No password required. For demos only.
+    """
+    role = payload.role.lower()
+    if role not in ["client", "ae", "verifier", "admin"]:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    # Try to find an existing user by role, prefer demo emails
+    preferred_email = f"{role}@saasoty.io"
+    user = db["user"].find_one({"email": preferred_email}) or db["user"].find_one({"role": role})
+
+    # ensure at least one AE exists to assign to client
+    def ensure_ae() -> Optional[str]:
+        ae = db["user"].find_one({"role": "ae"})
+        if ae:
+            return str(ae.get("_id"))
+        ae_doc = UserSchema(name="Auto AE", email="ae@saasoty.io", password_hash=hash_password("impersonated"), role="ae").model_dump()
+        return create_document("user", ae_doc)
+
+    if not user:
+        assigned_ae_id: Optional[str] = None
+        if role == "client":
+            assigned_ae_id = ensure_ae()
+        doc = UserSchema(
+            name=role.capitalize(),
+            email=preferred_email,
+            password_hash=hash_password("impersonated"),
+            role=role,
+            assigned_ae_id=assigned_ae_id,
+        ).model_dump()
+        new_id = create_document("user", doc)
+        user = db["user"].find_one({"_id": ObjectId(new_id)}) if ObjectId.is_valid(new_id) else db["user"].find_one({"_id": new_id})
+
+    token = create_access_token({"sub": str(user.get("_id")), "email": user.get("email"), "role": role})
+    user_out = {k: user[k] for k in ["name", "email", "role"] if k in user}
+    user_out["id"] = str(user.get("_id"))
+    user_out["assigned_ae_id"] = user.get("assigned_ae_id")
+    return TokenResponse(access_token=token, user=user_out)
 
 
 # ----------------------------------------------------------------------------
