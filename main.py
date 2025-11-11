@@ -167,9 +167,17 @@ def test_database():
 def seed():
     def ensure_user(name: str, email: str, role: str, password: str, assigned_ae_id: Optional[str] = None):
         u = db["user"].find_one({"email": email})
-        if u:
-            return str(u.get("_id"))
         hashed = hash_password(password)
+        if u:
+            # Ensure role, assigned AE, and reset password for demo stability
+            updates: Dict[str, Any] = {
+                "role": role,
+                "password_hash": hashed,
+            }
+            if assigned_ae_id is not None:
+                updates["assigned_ae_id"] = assigned_ae_id
+            db["user"].update_one({"_id": u.get("_id")}, {"$set": updates})
+            return str(u.get("_id"))
         doc = UserSchema(name=name, email=email, password_hash=hashed, role=role, assigned_ae_id=assigned_ae_id).model_dump()
         return create_document("user", doc)
 
@@ -341,7 +349,7 @@ def create_estimate(payload: EstimateCreateRequest, current=Depends(get_current_
         db["user"].find_one({"_id": ObjectId(req.get("client_id"))}) if ObjectId.is_valid(req.get("client_id", "")) else None
     )
     if client:
-        notify_email(client.get("email", ""), "Estimate uploaded", f"An estimate for requirement {str(req.get('_id'))} is available.")
+        notify_email(client.get("email", ""), "Estimate uploaded", f"An estimate for requirement {str(req.get("_id"))} is available.")
     add_audit("estimate", eid, "created", uid, {"requirement_id": str(req.get("_id"))})
     return {"id": eid}
 
@@ -423,7 +431,7 @@ async def submit_po(
 
     verifiers = list(db["user"].find({"role": {"$in": ["verifier", "admin"]}}))
     for v in verifiers:
-        notify_email(v.get("email", ""), "PO uploaded", f"PO for requirement {str(req.get('_id'))} is pending verification.")
+        notify_email(v.get("email", ""), "PO uploaded", f"PO for requirement {str(req.get("_id"))} is pending verification.")
 
     add_audit("po", po_id, "submitted", uid, {"requirement_id": str(req.get("_id"))})
     return {"id": po_id}
@@ -476,7 +484,7 @@ def review_po(po_id: str, payload: VerifyPORequest, current=Depends(get_current_
             db["user"].find_one({"_id": ObjectId(req.get("ae_id"))}) if ObjectId.is_valid(req.get("ae_id", "")) else None
         )
         for u in filter(None, [client, ae]):
-            notify_email(u.get("email", ""), f"PO {status}", f"PO for requirement {str(req.get('_id'))} has been {status}.")
+            notify_email(u.get("email", ""), f"PO {status}", f"PO for requirement {str(req.get("_id"))} has been {status}.")
 
     add_audit("po", str(po.get("_id")), status, current.get("id"))
     return {"ok": True}
