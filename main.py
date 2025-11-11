@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
 import jwt
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
@@ -82,7 +82,10 @@ def hash_password(p: str) -> str:
 
 
 def verify_password(p: str, hashed: str) -> bool:
-    return password_context.verify(p, hashed)
+    try:
+        return password_context.verify(p, hashed)
+    except Exception:
+        return False
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -189,6 +192,24 @@ def seed():
     return {"ae_id": ae_id, "client_id": client_id, "verifier_id": verifier_id, "admin_id": admin_id}
 
 
+# Debug helper: reseed and verify password hashes for demo users
+@app.post("/debug/seed-verify")
+def seed_and_verify():
+    result = {"seeded": True, "checks": []}
+    try:
+        seed()
+        for email in ["client@saasoty.io", "ae@saasoty.io", "verifier@saasoty.io", "admin@saasoty.io"]:
+            u = db["user"].find_one({"email": email})
+            ok = False
+            if u and u.get("password_hash"):
+                ok = verify_password("password123", u.get("password_hash"))
+            result["checks"].append({"email": email, "exists": bool(u), "password_ok": ok})
+    except Exception as e:
+        result["seeded"] = False
+        result["error"] = str(e)
+    return result
+
+
 # ----------------------------------------------------------------------------
 # Auth routes
 # ----------------------------------------------------------------------------
@@ -204,6 +225,20 @@ def login(payload: LoginRequest):
     user_out["id"] = str(user.get("_id"))
     user_out["assigned_ae_id"] = user.get("assigned_ae_id")
     return TokenResponse(access_token=token, user=user_out)
+
+
+@app.get("/auth/test-login")
+def auth_test_login(email: str = Query(...), password: str = Query("password123")):
+    """Lightweight endpoint to help debug auth in demos."""
+    user = db["user"].find_one({"email": email})
+    if not user:
+        return {"email": email, "found": False, "password_ok": False}
+    return {
+        "email": email,
+        "found": True,
+        "role": user.get("role"),
+        "password_ok": verify_password(password, user.get("password_hash", "")),
+    }
 
 
 @app.post("/auth/register")
